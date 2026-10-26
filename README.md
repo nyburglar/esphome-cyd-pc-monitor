@@ -5,9 +5,9 @@
 
 A live PC hardware monitor on the ESP32 **"Cheap Yellow Display"** (CYD). It shows CPU and GPU temperature, load and power, RAM and VRAM usage, and fan speeds, all sent over the USB cable that powers it. It doesn't use Wi‑Fi, Home Assistant or the cloud.
 
-<!-- Add a photo of your CYD here: save it as docs/images/cyd.jpg and uncomment the next line.
-![CYD PC Stats running on a CYD](docs/images/cyd.jpg)
--->
+<p align="center">
+  <img src="docs/images/cyd.jpg" alt="The dashboard on a CYD in a 3D-printed case: CPU 55°C at 9% load and 58 W, GPU 44°C at 29% load and 18 W, RAM and VRAM bars, and fan speeds" width="640">
+</p>
 
 ## Features
 
