@@ -1,14 +1,17 @@
 <#
 .SYNOPSIS
-    Installs the CYD PC Stats feeder and starts it at every login.
+    Installs the CYD PC Stats feeder and LibreHardwareMonitor, and starts both at every login.
 
 .DESCRIPTION
     - Creates a private Python environment in %LOCALAPPDATA%\CYD-PC-Stats
     - Installs the feeder script and its two dependencies (psutil, pyserial)
     - Registers a "CYD PC Stats Feeder" scheduled task that runs it hidden at login
-    - Starts it right away
+    - Installs LibreHardwareMonitor with winget if it's missing, turns on its web server,
+      and sets it to start minimized to the tray at login (one UAC prompt, because it
+      needs admin rights to read CPU temperatures)
+    - Starts everything right away
 
-    Running it again upgrades an existing install. No admin rights needed.
+    Running it again upgrades an existing install.
 
 .PARAMETER Port
     COM port of the CYD, e.g. COM5. By default the feeder finds it automatically.
@@ -16,9 +19,9 @@
 .PARAMETER NoAutostart
     Install the feeder but don't create the login task or start it.
 
-.PARAMETER InstallLibreHardwareMonitor
-    Also install LibreHardwareMonitor with winget (needed for CPU temperature,
-    CPU power and fan speeds).
+.PARAMETER SkipLibreHardwareMonitor
+    Don't install or configure LibreHardwareMonitor. CPU temperature, CPU power and
+    fan speeds will show "--"; everything else still works.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File .\install.ps1
@@ -29,7 +32,7 @@
 param(
     [string]$Port,
     [switch]$NoAutostart,
-    [switch]$InstallLibreHardwareMonitor
+    [switch]$SkipLibreHardwareMonitor
 )
 
 $ErrorActionPreference = 'Stop'
@@ -55,6 +58,62 @@ function Find-Python {
         if ($LASTEXITCODE -eq 0 -and "$out".Trim() -eq '1') { return , (@($exe) + $pre) }
     }
     return $null
+}
+
+function Find-LibreHardwareMonitor {
+    # Its own startup task, then the winget install location.
+    $task = Get-ScheduledTask -TaskName 'LibreHardwareMonitor' -TaskPath '\' -ErrorAction SilentlyContinue
+    if ($task) {
+        $exe = $task.Actions | Where-Object { $_.Execute -match 'LibreHardwareMonitor\.exe$' } | Select-Object -First 1 -ExpandProperty Execute
+        if ($exe -and (Test-Path $exe)) { return $exe }
+    }
+    $packages = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages'
+    $found = Get-ChildItem $packages -Directory -Filter 'LibreHardwareMonitor.LibreHardwareMonitor_*' -ErrorAction SilentlyContinue |
+        ForEach-Object { Join-Path $_.FullName 'LibreHardwareMonitor.exe' } | Where-Object { Test-Path $_ } | Select-Object -First 1
+    return $found
+}
+
+# Runs elevated: stops LibreHardwareMonitor without letting it save (it rewrites its settings
+# file on exit), turns on the web server, start-minimized and minimize-to-tray in that file,
+# registers the same startup task as its own "Run On Windows Startup" option, and starts it.
+$LhmSetupScript = @'
+$ErrorActionPreference = 'Stop'
+$exe = '__EXE__'
+$user = '__USER__'
+Get-Process LibreHardwareMonitor -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Milliseconds 800
+
+$config = [IO.Path]::ChangeExtension($exe, '.config')
+$doc = New-Object System.Xml.XmlDocument
+if (Test-Path $config) { $doc.Load($config) }
+else { $doc.LoadXml('<?xml version="1.0" encoding="utf-8"?><configuration><appSettings /></configuration>') }
+$appSettings = $doc.SelectSingleNode('/configuration/appSettings')
+$wanted = [ordered]@{ runWebServerMenuItem = 'true'; listenerPort = '8085'; startMinMenuItem = 'true'; minTrayMenuItem = 'true' }
+foreach ($key in $wanted.Keys) {
+    $node = $appSettings.SelectSingleNode("add[@key='$key']")
+    if (-not $node) {
+        $node = $doc.CreateElement('add')
+        $node.SetAttribute('key', $key)
+        [void]$appSettings.AppendChild($node)
+    }
+    $node.SetAttribute('value', $wanted[$key])
+}
+$doc.Save($config)
+
+$action = New-ScheduledTaskAction -Execute $exe -WorkingDirectory (Split-Path $exe)
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+$principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+Register-ScheduledTask -TaskName 'LibreHardwareMonitor' -TaskPath '\' -Action $action -Trigger $trigger -Principal $principal `
+    -Settings $settings -Description 'Starts LibreHardwareMonitor on Windows startup.' -Force | Out-Null
+Start-ScheduledTask -TaskName 'LibreHardwareMonitor'
+'@
+
+function Test-LhmWebServer {
+    try {
+        $null = Invoke-WebRequest -UseBasicParsing -Uri 'http://localhost:8085/data.json' -TimeoutSec 3
+        return $true
+    } catch { return $false }
 }
 
 function Stop-Feeder {
@@ -114,30 +173,55 @@ if (-not (Test-Path $venvPython)) {
 if ($LASTEXITCODE -ne 0) { throw 'Installing Python packages failed.' }
 
 # 4. LibreHardwareMonitor ----------------------------------------------------------------
-Write-Step 'Checking LibreHardwareMonitor (CPU temperature, CPU power, fan speeds)'
-$lhmRunning = [bool](Get-Process LibreHardwareMonitor -ErrorAction SilentlyContinue)
-if (-not $lhmRunning -and $InstallLibreHardwareMonitor) {
-    if (Get-Command winget -ErrorAction SilentlyContinue) {
-        winget install --id LibreHardwareMonitor.LibreHardwareMonitor --exact --accept-source-agreements --accept-package-agreements
-        Write-Note 'Installed. Start it as administrator and finish the setup below.'
-    } else {
-        Write-Warn 'winget is not available; download it from github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases'
-    }
-}
-$lhmWeb = $false
-try {
-    $null = Invoke-WebRequest -UseBasicParsing -Uri 'http://localhost:8085/data.json' -TimeoutSec 3
-    $lhmWeb = $true
-} catch { }
-if ($lhmWeb) {
-    Write-Note 'Web server is running on port 8085. All stats will be available.'
+if ($SkipLibreHardwareMonitor) {
+    Write-Step 'Skipping LibreHardwareMonitor (-SkipLibreHardwareMonitor)'
 } else {
-    if ($lhmRunning) { Write-Warn 'LibreHardwareMonitor is running, but its web server is off.' }
-    else { Write-Warn 'LibreHardwareMonitor is not running. CPU temp, CPU power and fan speeds will show "--".' }
-    Write-Warn 'To enable them: run LibreHardwareMonitor as administrator, then turn on'
-    Write-Warn '  Options > Remote Web Server > Run   and   Options > Run On Windows Startup'
-    if (-not $InstallLibreHardwareMonitor -and -not $lhmRunning) {
-        Write-Warn 'Install it with:  winget install LibreHardwareMonitor.LibreHardwareMonitor'
+    Write-Step 'Setting up LibreHardwareMonitor (CPU temperature, CPU power, fan speeds)'
+    $lhmExe = Find-LibreHardwareMonitor
+    if (-not $lhmExe) {
+        if (Get-Command winget -ErrorAction SilentlyContinue) {
+            Write-Note 'Installing it with winget...'
+            winget install --id LibreHardwareMonitor.LibreHardwareMonitor --exact --silent `
+                --accept-source-agreements --accept-package-agreements --disable-interactivity | Out-Null
+            $lhmExe = Find-LibreHardwareMonitor
+            if (-not $lhmExe) { Write-Warn "winget couldn't install it (exit code $LASTEXITCODE)." }
+        } else {
+            Write-Warn 'winget is not available.'
+        }
+    }
+
+    $lhmReady = $false
+    if ($lhmExe) {
+        Write-Note "Using $lhmExe"
+        Write-Note 'Turning on its web server and startup task. Approve the UAC prompt;'
+        Write-Note 'it needs admin rights to read CPU sensors.'
+        $script = $LhmSetupScript.Replace('__EXE__', $lhmExe.Replace("'", "''")).Replace('__USER__', "$env:USERDOMAIN\$env:USERNAME".Replace("'", "''"))
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
+        $elevatedOk = $false
+        try {
+            $proc = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -WindowStyle Hidden `
+                -ArgumentList "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded"
+            $elevatedOk = ($proc.ExitCode -eq 0)
+            if (-not $elevatedOk) { Write-Warn "The setup step failed (exit code $($proc.ExitCode))." }
+        } catch {
+            Write-Warn 'The UAC prompt was declined or failed.'
+        }
+        if ($elevatedOk) {
+            for ($i = 0; $i -lt 20 -and -not $lhmReady; $i++) {
+                $lhmReady = Test-LhmWebServer
+                if (-not $lhmReady) { Start-Sleep -Seconds 2 }
+            }
+            if (-not $lhmReady) { Write-Warn 'LibreHardwareMonitor started, but its web server did not answer on port 8085.' }
+        }
+    }
+
+    if ($lhmReady) {
+        Write-Note 'Running in the tray with its web server on port 8085, and starts at login.'
+    } else {
+        Write-Warn 'CPU temperature, CPU power and fan speeds will show "--" until this is fixed.'
+        Write-Warn 'Run this installer again, or set it up by hand: install LibreHardwareMonitor'
+        Write-Warn '(winget install LibreHardwareMonitor.LibreHardwareMonitor), run it as administrator,'
+        Write-Warn 'and turn on Options > Remote Web Server > Run and Options > Run On Windows Startup.'
     }
 }
 

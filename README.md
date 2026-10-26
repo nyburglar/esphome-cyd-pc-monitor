@@ -26,7 +26,7 @@ A live PC hardware monitor on the ESP32 **"Cheap Yellow Display"** (CYD). It sho
 | **Display** | ESP32-2432S028 "Cheap Yellow Display", 2.8" 320×240. Any revision: micro-USB only, or micro-USB + USB‑C. |
 | **Cable** | A USB **data** cable. Use USB‑A to micro-USB or USB‑A to USB‑C, because many CYDs don't work with C‑to‑C cables. For mounting inside the case, a "USB 2.0 9‑pin header to micro-USB/USB‑C" cable works. |
 | **PC** | Windows 10 or 11 with [Python](https://www.python.org/downloads/) 3.9 or newer |
-| **Sensors** | [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) (free), needed for CPU temperature, CPU power and fan speeds |
+| **Sensors** | [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) (free), for CPU temperature, CPU power and fan speeds. The installer sets it up for you. |
 
 ## Quick start
 
@@ -46,22 +46,7 @@ The number of USB ports doesn't reliably tell you the controller. If the screen 
 
 > **Won't connect?** Some CYDs can't enter flashing mode by themselves. Hold the **BOOT** button on the back while the flasher connects, and let go once it starts writing.
 
-### 2. Set up LibreHardwareMonitor
-
-```powershell
-winget install LibreHardwareMonitor.LibreHardwareMonitor
-```
-
-Run it **as administrator**. It needs admin rights to read CPU temperatures. Then turn on:
-
-- **Options → Remote Web Server → Run** (port 8085). The feeder reads sensors from here.
-- **Options → Run On Windows Startup**
-
-Close it once with **File → Exit** so it saves these settings, then start it again.
-
-You can skip this step. Without it, CPU temperature, CPU power and fan speeds show `--`, and everything else still works. NVIDIA GPU stats fall back to `nvidia-smi`.
-
-### 3. Install the PC feeder
+### 2. Run the installer
 
 Open PowerShell and run:
 
@@ -79,17 +64,21 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 The installer:
 
-- creates a private Python environment in `%LOCALAPPDATA%\CYD-PC-Stats`
-- adds a **CYD PC Stats Feeder** login task
-- starts the feeder
+- installs the feeder in a private Python environment in `%LOCALAPPDATA%\CYD-PC-Stats`, with a **CYD PC Stats Feeder** login task that runs it hidden
+- installs **LibreHardwareMonitor** with winget if you don't have it
+- turns on LibreHardwareMonitor's web server, and sets it to start minimized to the tray at every login
 
-It doesn't need admin rights, and running it again upgrades an existing install. Within a few seconds, the "Waiting for PC" box on the CYD disappears.
+You'll get **one UAC prompt**. LibreHardwareMonitor needs admin rights to read CPU sensors, so its part of the setup runs elevated. Everything else runs as you. Within a few seconds, the "Waiting for PC" box on the CYD disappears.
+
+Running the installer again upgrades an existing install. It also repairs LibreHardwareMonitor's settings if they were changed.
 
 | Installer option | What it does |
 |---|---|
 | `-Port COM5` | Use this COM port instead of auto-detecting the CYD |
-| `-NoAutostart` | Install without the login task |
-| `-InstallLibreHardwareMonitor` | Also install LibreHardwareMonitor with winget |
+| `-NoAutostart` | Install the feeder without its login task |
+| `-SkipLibreHardwareMonitor` | Don't touch LibreHardwareMonitor. CPU temperature, CPU power and fan speeds show `--`; NVIDIA GPU stats fall back to `nvidia-smi`. |
+
+> LibreHardwareMonitor's web server listens on port 8085 on all network interfaces. Windows Firewall blocks other computers from reaching it unless you've allowed that port. If you open it, anyone on your network can read your sensor values.
 
 ## How it works
 
@@ -123,7 +112,7 @@ The feeder finds the CYD by its USB‑serial chip (CH340/CH9102 or CP210x), so i
 | White or scrambled screen | Wrong display controller. Flash a different firmware variant (see step 1). |
 | "Waiting for PC" | The feeder isn't running or can't open the port. Check `%LOCALAPPDATA%\CYD-PC-Stats\feeder.log`. |
 | Log says the port is busy | Another program has the COM port open. **SignalRGB** is a common culprit because it scans serial ports. Close it or exclude the port. |
-| CPU temp/power show `--` | LibreHardwareMonitor isn't running as admin, or its web server is off. |
+| CPU temp/power show `--` | LibreHardwareMonitor isn't running, or its web server is off. Run the installer again to repair it. |
 
 More in [docs/troubleshooting.md](docs/troubleshooting.md).
 
@@ -133,7 +122,7 @@ More in [docs/troubleshooting.md](docs/troubleshooting.md).
 powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\CYD-PC-Stats\uninstall.ps1"
 ```
 
-This removes the login task, the feeder and its folder. LibreHardwareMonitor and the firmware on the CYD stay.
+This removes the login task, the feeder and its folder. LibreHardwareMonitor and the firmware on the CYD stay. To remove LibreHardwareMonitor too, run `winget uninstall LibreHardwareMonitor.LibreHardwareMonitor` and delete its **LibreHardwareMonitor** task in Task Scheduler.
 
 ## Tested on
 

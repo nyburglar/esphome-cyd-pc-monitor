@@ -49,7 +49,9 @@ Get-ScheduledTaskInfo "CYD PC Stats Feeder" | Select-Object LastRunTime, LastTas
 
 | Symptom | Fix |
 |---|---|
-| CPU temperature and power show `--` | LibreHardwareMonitor must run **as administrator** with **Options → Remote Web Server → Run** turned on. Check `http://localhost:8085` in a browser. |
-| The web server is off again after a reboot | LibreHardwareMonitor saves its settings only when it closes. Turn the options on, close it once with **File → Exit**, and start it again. Also turn on **Run On Windows Startup**. |
+| CPU temperature and power show `--` | Run the installer again. It reinstalls LibreHardwareMonitor if it's missing, turns its web server back on, and restarts it. To check by hand, open `http://localhost:8085` in a browser. |
+| The installer says the UAC prompt was declined | LibreHardwareMonitor's setup needs one elevated step. Run the installer again and approve the prompt, or use `-SkipLibreHardwareMonitor`. |
+| The web server is off again after changing settings by hand | LibreHardwareMonitor saves its settings only when it closes (**File → Exit** or Windows sign-out). If it's killed instead, changes are lost. Running the installer again writes them directly. |
+| LibreHardwareMonitor isn't installed through winget | The installer finds it through its **LibreHardwareMonitor** startup task. If you have neither, it installs a copy with winget. |
 | Wrong fan shown as "CPU" | Run `pc_stats_feeder.py --list-sensors`, find your CPU fan header, and pass `--cpu-fan "<name>"`. |
 | GPU fan shows 0 rpm | Normal for many GPUs at idle. The fans stop below about 50–60°C. |
