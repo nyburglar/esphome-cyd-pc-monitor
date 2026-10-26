@@ -31,7 +31,7 @@ import psutil
 import serial
 from serial.tools import list_ports
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 log = logging.getLogger("cyd-pc-stats")
 
@@ -44,7 +44,7 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # ---------------------------------------------------------------- LibreHardwareMonitor
 
 def _parse_value(text):
-    """'55.4 °C' -> 55.4, '6,144 MB' -> 6144.0 (also handles comma decimals)."""
+    """'55.4 Â°C' -> 55.4, '6,144 MB' -> 6144.0 (also handles comma decimals)."""
     m = re.search(r"-?\d[\d.,]*", text or "")
     if not m:
         return None
@@ -226,6 +226,50 @@ class StatusLog:
             self.last = msg
 
 
+class LhmWatchdog:
+    """Restart LibreHardwareMonitor through its startup task if it has exited.
+
+    LibreHardwareMonitor occasionally crashes on its own. The installer registers a
+    "LibreHardwareMonitor" task that runs it elevated; a normal user can trigger that task,
+    so it comes back as admin without a UAC prompt.
+    """
+
+    TASK = "LibreHardwareMonitor"
+    GRACE = 20       # seconds unreachable before acting
+    RETRY = 120      # seconds between restart attempts
+
+    def __init__(self):
+        self.down_since = None
+        self.last_attempt = -self.RETRY
+
+    def update(self, lhm_up):
+        now = time.monotonic()
+        if lhm_up:
+            self.down_since = None
+            return
+        if self.down_since is None:
+            self.down_since = now
+        if now - self.down_since < self.GRACE or now - self.last_attempt < self.RETRY:
+            return
+        self.last_attempt = now
+        if any(p.info["name"] == "LibreHardwareMonitor.exe" for p in psutil.process_iter(["name"])):
+            # Running but not answering: starting up, or its web server was turned off.
+            # Don't fight it; restarting wouldn't change its settings.
+            log.info("LibreHardwareMonitor is running but its web server isn't answering on port 8085")
+            return
+        try:
+            res = subprocess.run(["schtasks", "/run", "/tn", self.TASK], capture_output=True, text=True,
+                                 timeout=15, creationflags=NO_WINDOW)
+        except (OSError, subprocess.SubprocessError) as e:
+            log.info(f"LibreHardwareMonitor isn't running; couldn't start its task: {e}")
+            return
+        if res.returncode == 0:
+            log.info("LibreHardwareMonitor isn't running; restarted it through its startup task")
+        else:
+            log.info("LibreHardwareMonitor isn't running and its startup task couldn't be started "
+                     f"({(res.stderr or res.stdout).strip()}). Run install.ps1 again to set it up.")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", help="COM port of the CYD (default: auto-detect)")
@@ -235,6 +279,8 @@ def main():
     ap.add_argument("--list-sensors", action="store_true", help="print LibreHardwareMonitor sensors and exit")
     ap.add_argument("--dry-run", action="store_true", help="print lines instead of sending them")
     ap.add_argument("--log-file", help="also write status messages to this file (rotates at 500 KB)")
+    ap.add_argument("--no-restart-lhm", action="store_true",
+                    help="don't restart LibreHardwareMonitor through its startup task if it exits")
     ap.add_argument("-v", "--verbose", action="store_true", help="log every line sent")
     ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = ap.parse_args()
@@ -252,12 +298,15 @@ def main():
     psutil.cpu_percent(interval=None)  # prime the counter; the first reading is always 0
     lhm_status = StatusLog()
     serial_status = StatusLog()
+    watchdog = None if (args.no_restart_lhm or args.dry_run) else LhmWatchdog()
     ser = None
     while True:
         started = time.monotonic()
         stats, lhm_up = collect(args)
         lhm_status("LibreHardwareMonitor: " + ("connected" if lhm_up else
                    f"not reachable at {LHM_URL} (no CPU temp/power or fan RPM)"))
+        if watchdog:
+            watchdog.update(lhm_up)
         line = format_line(stats)
 
         if args.dry_run:

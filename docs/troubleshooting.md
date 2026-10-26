@@ -31,7 +31,9 @@ Get-Content "$env:LOCALAPPDATA\CYD-PC-Stats\feeder.log" -Tail 20
 |---|---|
 | `CYD not found (no CH340/CP210x COM port)` | The CYD isn't plugged in, or it uses a different USB chip. Run the installer with `-Port COMx`. |
 | `could not open port ... Access is denied` | Another program has the port open. SignalRGB is a frequent cause because it probes every serial port for RGB devices; exclude the CYD's port in its settings. |
-| `LibreHardwareMonitor: not reachable` | LibreHardwareMonitor isn't running, or its web server is off. See below. |
+| `LibreHardwareMonitor: not reachable` | LibreHardwareMonitor isn't running, or its web server is off. If it has exited, the feeder restarts it automatically after 20 s. See below. |
+| `its startup task couldn't be started` | The `LibreHardwareMonitor` task is missing. Run the installer again to recreate it. |
+| `running but its web server isn't answering` | LibreHardwareMonitor's web server was turned off. Run the installer again, or turn on **Options → Remote Web Server → Run**. |
 
 Check whether the feeder is running:
 
@@ -49,6 +51,7 @@ Get-ScheduledTaskInfo "CYD PC Stats Feeder" | Select-Object LastRunTime, LastTas
 
 | Symptom | Fix |
 |---|---|
+| CPU temperature and power drop out for under a minute, then come back | LibreHardwareMonitor crashed, and the feeder restarted it. The feeder log shows `restarted it through its startup task`. These are crashes inside LibreHardwareMonitor itself; Event Viewer → Windows Logs → Application has the details. |
 | CPU temperature and power show `--` | Run the installer again. It reinstalls LibreHardwareMonitor if it's missing, turns its web server back on, and restarts it. To check by hand, open `http://localhost:8085` in a browser. |
 | The installer says the UAC prompt was declined | LibreHardwareMonitor's setup needs one elevated step. Run the installer again and approve the prompt, or use `-SkipLibreHardwareMonitor`. |
 | The web server is off again after changing settings by hand | LibreHardwareMonitor saves its settings only when it closes (**File → Exit** or Windows sign-out). If it's killed instead, changes are lost. Running the installer again writes them directly. |

@@ -99,6 +99,8 @@ An empty field means "unknown" and shows as `--`. On the CYD, ESPHome's serial l
 
 The feeder finds the CYD by its USB‑serial chip (CH340/CH9102 or CP210x), so it keeps working when you move it to another USB port. If the CYD is unplugged, the feeder retries every few seconds.
 
+LibreHardwareMonitor occasionally crashes on its own. If it stays unreachable for 20 seconds and isn't running, the feeder restarts it through its startup task. That brings it back with admin rights and no UAC prompt, and the feeder tries at most once every 2 minutes. Use `--no-restart-lhm` to turn this off.
+
 ## Customizing
 
 - **Which fan counts as the CPU fan**: by default the feeder uses a fan header with "CPU" in its name. List every sensor with `--list-sensors` and choose one with `--cpu-fan "Fan #2"`. Add these options to the login task's arguments, or run the installer with `-NoAutostart` and start the feeder your own way.
