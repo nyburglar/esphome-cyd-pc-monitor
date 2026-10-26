@@ -1,0 +1,402 @@
+# CYD PC Stats: shared firmware for the ESP32-2432S028 "Cheap Yellow Display".
+# Don't build this file directly; build the variant for your panel instead
+# (cyd-ili9341.yaml, cyd-ili9342.yaml or cyd-st7789.yaml), which sets these substitutions:
+#   device_name    ESPHome device name
+#   display_model  mipi_spi board preset for the panel
+#   lvgl_rotation  rotation that makes the panel landscape
+#
+# Stats arrive over the USB serial port from the PC feeder, one line per update:
+#   PCS,cpu_temp,cpu_load,cpu_power,gpu_temp,gpu_load,gpu_power,
+#       ram_used_gb,ram_total_gb,vram_used_gb,vram_total_gb,cpu_fan_rpm,gpu_fan_rpm
+# An empty field means "unknown" and is shown as "--".
+
+esphome:
+  name: ${device_name}
+  friendly_name: CYD PC Stats
+  project:
+    name: nyburglar.cyd-pc-stats
+    version: "1.0.0"
+  on_boot:
+    priority: -100
+    then:
+      - light.turn_on:
+          id: backlight
+          brightness: 100%
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+# The USB serial port (UART0) is used for stats, so serial logging must be off.
+logger:
+  baud_rate: 0
+
+uart:
+  id: pc_uart
+  tx_pin: GPIO1
+  rx_pin: GPIO3
+  baud_rate: 115200
+  rx_buffer_size: 1024
+
+spi:
+  - id: tft_spi
+    clk_pin: GPIO14
+    mosi_pin: GPIO13
+    miso_pin: GPIO12
+
+output:
+  - platform: ledc
+    id: backlight_pwm
+    pin: GPIO21
+
+light:
+  - platform: monochromatic
+    id: backlight
+    output: backlight_pwm
+    restore_mode: ALWAYS_ON
+    default_transition_length: 500ms
+
+display:
+  - platform: mipi_spi
+    id: tft
+    # CYDs ship with ILI9341, ILI9342 or ST7789 panels, regardless of how many USB
+    # ports the board has. The wrong preset gives a white or scrambled screen.
+    model: ${display_model}
+    spi_id: tft_spi
+    # If red/blue are swapped add `color_order: rgb` (or bgr);
+    # if colors look like a photo negative add `invert_colors: true`.
+    auto_clear_enabled: false
+    update_interval: never
+
+globals:
+  - id: last_rx_ms
+    type: uint32_t
+    initial_value: '0'
+  - id: pc_online
+    type: bool
+    initial_value: 'false'
+
+# Read and parse lines from the PC.
+interval:
+  - interval: 20ms
+    then:
+      - lambda: |-
+          static std::string line;
+          uint8_t c;
+          while (id(pc_uart).available() && id(pc_uart).read_byte(&c)) {
+            if (c == '\r') continue;
+            if (c != '\n') {
+              if (line.size() < 256) line += (char) c; else line.clear();
+              continue;
+            }
+            if (line.rfind("PCS,", 0) != 0) { line.clear(); continue; }
+
+            const int N = 12;
+            float v[N];
+            const char *p = line.c_str() + 4;
+            int n = 0;
+            while (n < N) {
+              char *end;
+              float f = strtof(p, &end);
+              v[n++] = (end == p) ? NAN : f;
+              p = end;
+              while (*p && *p != ',') p++;
+              if (*p != ',') break;
+              p++;
+            }
+            line.clear();
+            if (n != N) continue;
+
+            const float cpu_t = v[0], cpu_l = v[1], cpu_p = v[2];
+            const float gpu_t = v[3], gpu_l = v[4], gpu_p = v[5];
+            const float ram_u = v[6], ram_tot = v[7], vram_u = v[8], vram_tot = v[9];
+            const float fan_cpu = v[10], fan_gpu = v[11];
+
+            char buf[48];
+            auto temp_color = [](float t, float warn, float hot) -> lv_color_t {
+              if (std::isnan(t)) return lv_color_hex(0x8a8f98);
+              if (t >= hot) return lv_color_hex(0xf87171);
+              if (t >= warn) return lv_color_hex(0xfbbf24);
+              return lv_color_hex(0x4ade80);
+            };
+            auto set_temp = [&](lv_obj_t *lbl, float t, float warn, float hot) {
+              if (std::isnan(t)) snprintf(buf, sizeof(buf), "--°C");
+              else snprintf(buf, sizeof(buf), "%.0f°C", t);
+              lv_label_set_text(lbl, buf);
+              lv_obj_set_style_text_color(lbl, temp_color(t, warn, hot), 0);
+            };
+            auto set_load = [&](lv_obj_t *arc, lv_obj_t *lbl, float l) {
+              lv_arc_set_value(arc, std::isnan(l) ? 0 : (int16_t) lroundf(l));
+              if (std::isnan(l)) snprintf(buf, sizeof(buf), "-- %%");
+              else snprintf(buf, sizeof(buf), "%.0f%% load", l);
+              lv_label_set_text(lbl, buf);
+            };
+            auto set_power = [&](lv_obj_t *lbl, float w) {
+              if (std::isnan(w)) snprintf(buf, sizeof(buf), "-- W");
+              else snprintf(buf, sizeof(buf), "%.0f W", w);
+              lv_label_set_text(lbl, buf);
+            };
+            auto set_mem = [&](lv_obj_t *bar, lv_obj_t *lbl, float used, float total) {
+              if (std::isnan(used) || std::isnan(total) || total <= 0) {
+                lv_bar_set_value(bar, 0, LV_ANIM_OFF);
+                lv_label_set_text(lbl, "-- / -- GB");
+                return;
+              }
+              lv_bar_set_value(bar, (int32_t) lroundf(used / total * 100.0f), LV_ANIM_OFF);
+              snprintf(buf, sizeof(buf), "%.1f / %.0f GB  (%.0f%%)", used, total, used / total * 100.0f);
+              lv_label_set_text(lbl, buf);
+            };
+
+            set_temp(id(cpu_temp_lbl), cpu_t, 70, 85);
+            set_load(id(cpu_arc), id(cpu_load_lbl), cpu_l);
+            set_power(id(cpu_power_lbl), cpu_p);
+            set_temp(id(gpu_temp_lbl), gpu_t, 70, 80);
+            set_load(id(gpu_arc), id(gpu_load_lbl), gpu_l);
+            set_power(id(gpu_power_lbl), gpu_p);
+            set_mem(id(ram_bar), id(ram_lbl), ram_u, ram_tot);
+            set_mem(id(vram_bar), id(vram_lbl), vram_u, vram_tot);
+
+            char a[16], b[16];
+            if (std::isnan(fan_cpu)) snprintf(a, sizeof(a), "--"); else snprintf(a, sizeof(a), "%.0f", fan_cpu);
+            if (std::isnan(fan_gpu)) snprintf(b, sizeof(b), "--"); else snprintf(b, sizeof(b), "%.0f", fan_gpu);
+            snprintf(buf, sizeof(buf), "Fans  CPU %s rpm   GPU %s rpm", a, b);
+            lv_label_set_text(id(fan_lbl), buf);
+
+            id(last_rx_ms) = millis();
+            if (!id(pc_online)) {
+              id(pc_online) = true;
+              lv_obj_add_flag(id(offline_box), LV_OBJ_FLAG_HIDDEN);
+              auto call = id(backlight).turn_on();
+              call.set_brightness(1.0f);
+              call.perform();
+            }
+          }
+
+  # No data for a while: show the "waiting" banner, then dim the backlight.
+  - interval: 1s
+    then:
+      - lambda: |-
+          uint32_t idle = millis() - id(last_rx_ms);
+          if (id(pc_online) && idle > 5000) {
+            id(pc_online) = false;
+            lv_obj_clear_flag(id(offline_box), LV_OBJ_FLAG_HIDDEN);
+          }
+          if (!id(pc_online) && idle > 60000 && id(backlight).current_values.get_brightness() > 0.15f) {
+            auto call = id(backlight).turn_on();
+            call.set_brightness(0.1f);
+            call.perform();
+          }
+
+lvgl:
+  buffer_size: 25%
+  # Landscape. Add 180 to the variant's lvgl_rotation if the picture is upside down.
+  rotation: ${lvgl_rotation}
+  pages:
+    - id: main_page
+      bg_color: 0x000000
+      widgets:
+        # ---------- CPU card ----------
+        - obj:
+            x: 4
+            y: 4
+            width: 154
+            height: 144
+            pad_all: 0
+            radius: 10
+            border_width: 0
+            bg_color: 0x16191f
+            scrollable: false
+            widgets:
+              - label:
+                  x: 10
+                  y: 6
+                  text: "CPU"
+                  text_font: montserrat_16
+                  text_color: 0x4fa3ff
+              - label:
+                  id: cpu_power_lbl
+                  align: TOP_RIGHT
+                  x: -10
+                  y: 6
+                  text: "-- W"
+                  text_font: montserrat_16
+                  text_color: 0xc0c4cc
+              - arc:
+                  id: cpu_arc
+                  align: TOP_MID
+                  y: 28
+                  width: 112
+                  height: 112
+                  min_value: 0
+                  max_value: 100
+                  value: 0
+                  adjustable: false
+                  arc_width: 9
+                  arc_color: 0x2a2e36
+                  indicator:
+                    arc_width: 9
+                    arc_color: 0x4fa3ff
+                  widgets:
+                    - label:
+                        id: cpu_temp_lbl
+                        align: CENTER
+                        y: -6
+                        text: "--°C"
+                        text_font: montserrat_28
+                        text_color: 0x8a8f98
+                    - label:
+                        id: cpu_load_lbl
+                        align: CENTER
+                        y: 22
+                        text: "-- %"
+                        text_font: montserrat_14
+                        text_color: 0xc0c4cc
+
+        # ---------- GPU card ----------
+        - obj:
+            x: 162
+            y: 4
+            width: 154
+            height: 144
+            pad_all: 0
+            radius: 10
+            border_width: 0
+            bg_color: 0x16191f
+            scrollable: false
+            widgets:
+              - label:
+                  x: 10
+                  y: 6
+                  text: "GPU"
+                  text_font: montserrat_16
+                  text_color: 0x76d672
+              - label:
+                  id: gpu_power_lbl
+                  align: TOP_RIGHT
+                  x: -10
+                  y: 6
+                  text: "-- W"
+                  text_font: montserrat_16
+                  text_color: 0xc0c4cc
+              - arc:
+                  id: gpu_arc
+                  align: TOP_MID
+                  y: 28
+                  width: 112
+                  height: 112
+                  min_value: 0
+                  max_value: 100
+                  value: 0
+                  adjustable: false
+                  arc_width: 9
+                  arc_color: 0x2a2e36
+                  indicator:
+                    arc_width: 9
+                    arc_color: 0x76d672
+                  widgets:
+                    - label:
+                        id: gpu_temp_lbl
+                        align: CENTER
+                        y: -6
+                        text: "--°C"
+                        text_font: montserrat_28
+                        text_color: 0x8a8f98
+                    - label:
+                        id: gpu_load_lbl
+                        align: CENTER
+                        y: 22
+                        text: "-- %"
+                        text_font: montserrat_14
+                        text_color: 0xc0c4cc
+
+        # ---------- Memory ----------
+        - label:
+            x: 8
+            y: 152
+            text: "RAM"
+            text_font: montserrat_16
+            text_color: 0xb48cff
+        - label:
+            id: ram_lbl
+            align: TOP_RIGHT
+            x: -8
+            y: 153
+            text: "-- / -- GB"
+            text_font: montserrat_14
+            text_color: 0xe6e8ec
+        - bar:
+            id: ram_bar
+            x: 8
+            y: 172
+            width: 304
+            height: 10
+            min_value: 0
+            max_value: 100
+            value: 0
+            bg_color: 0x2a2e36
+            bg_opa: COVER
+            indicator:
+              bg_color: 0xb48cff
+
+        - label:
+            x: 8
+            y: 186
+            text: "VRAM"
+            text_font: montserrat_16
+            text_color: 0x76d672
+        - label:
+            id: vram_lbl
+            align: TOP_RIGHT
+            x: -8
+            y: 187
+            text: "-- / -- GB"
+            text_font: montserrat_14
+            text_color: 0xe6e8ec
+        - bar:
+            id: vram_bar
+            x: 8
+            y: 206
+            width: 304
+            height: 10
+            min_value: 0
+            max_value: 100
+            value: 0
+            bg_color: 0x2a2e36
+            bg_opa: COVER
+            indicator:
+              bg_color: 0x76d672
+
+        # ---------- Fans (lowest priority) ----------
+        - label:
+            id: fan_lbl
+            x: 8
+            y: 222
+            text: "Fans  CPU -- rpm   GPU -- rpm"
+            text_font: montserrat_14
+            text_color: 0x8a8f98
+
+        # ---------- Shown until the PC starts sending ----------
+        - obj:
+            id: offline_box
+            align: CENTER
+            width: 260
+            height: 70
+            radius: 10
+            border_width: 1
+            border_color: 0x3a3f4a
+            bg_color: 0x0d0f13
+            scrollable: false
+            widgets:
+              - label:
+                  align: CENTER
+                  y: -10
+                  text: "Waiting for PC..."
+                  text_font: montserrat_20
+                  text_color: 0xe6e8ec
+              - label:
+                  align: CENTER
+                  y: 14
+                  text: "is the PC feeder running?"
+                  text_font: montserrat_14
+                  text_color: 0x8a8f98

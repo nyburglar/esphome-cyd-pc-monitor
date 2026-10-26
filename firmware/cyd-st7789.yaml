@@ -1,0 +1,8 @@
+# CYD with an ST7789 panel (some dual-USB boards).
+substitutions:
+  device_name: cyd-pc-stats-st7789
+  display_model: ESP32-2432S028-7789
+  lvgl_rotation: "90"
+
+packages:
+  base: !include common.yaml

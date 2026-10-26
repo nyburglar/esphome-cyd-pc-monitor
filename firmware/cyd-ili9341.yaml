@@ -1,0 +1,8 @@
+# CYD with an ILI9341 panel: the original micro-USB ESP32-2432S028R, and some dual-USB boards.
+substitutions:
+  device_name: cyd-pc-stats-ili9341
+  display_model: ESP32-2432S028
+  lvgl_rotation: "90"
+
+packages:
+  base: !include common.yaml

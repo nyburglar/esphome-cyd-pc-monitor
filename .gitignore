@@ -1,0 +1,13 @@
+# ESPHome
+.esphome/
+secrets.yaml
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Logs and scratch files
+*.log
+_*.txt

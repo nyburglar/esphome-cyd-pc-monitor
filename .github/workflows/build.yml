@@ -1,0 +1,71 @@
+name: Build firmware
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.panel }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        panel: [ili9341, ili9342, st7789]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build with ESPHome
+        id: esphome
+        uses: esphome/build-action@v7.0.0
+        with:
+          yaml-file: firmware/cyd-${{ matrix.panel }}.yaml
+          version: 2026.9.1
+
+      - name: Collect firmware
+        run: |
+          mkdir -p out
+          src="${{ steps.esphome.outputs.name }}/${{ steps.esphome.outputs.name }}"
+          cp "$src.factory.bin" "out/cyd-pc-stats-${{ matrix.panel }}.factory.bin"
+          cp "$src.ota.bin" "out/cyd-pc-stats-${{ matrix.panel }}.ota.bin"
+          ls -l out
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: firmware-${{ matrix.panel }}
+          path: out/*
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: out
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: out/*.factory.bin
+          generate_release_notes: true
+          body: |
+            ## Which file do I flash?
+
+            Download the `.factory.bin` for your CYD's display controller and flash it at
+            [web.esphome.io](https://web.esphome.io) (Chrome or Edge): **Connect → Install → choose file**.
+
+            | File | Display controller |
+            |---|---|
+            | `cyd-pc-stats-ili9341.factory.bin` | ILI9341: original micro-USB CYD and some dual-USB boards. **Try this first.** |
+            | `cyd-pc-stats-ili9342.factory.bin` | ILI9342: some dual-USB boards |
+            | `cyd-pc-stats-st7789.factory.bin` | ST7789: some dual-USB boards |
+
+            White or scrambled screen? Flash the next one in the list. See the README for details.

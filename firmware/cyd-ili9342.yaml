@@ -1,0 +1,8 @@
+# CYD with an ILI9342 panel (some dual-USB boards). The ILI9342 is natively landscape.
+substitutions:
+  device_name: cyd-pc-stats-ili9342
+  display_model: ESP32-2432S028-9342
+  lvgl_rotation: "0"
+
+packages:
+  base: !include common.yaml
